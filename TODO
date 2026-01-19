@@ -1,0 +1,5 @@
+1. 0 Sized documents -> should be ignored
+2. Duplicated files -> 
+2.1 Rename files in repo
+2.2 Remove files from repo
+3. Move original files into a backup folder.

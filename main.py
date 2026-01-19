@@ -246,6 +246,67 @@ class RepoManager:
         finally:
             self._close_db()
 
+    def check_folder(self, folder_path):
+        """
+        Scans a folder for 0-byte files and files already existing in the repository.
+        """
+        if not os.path.isdir(folder_path):
+            print(f"Error: {folder_path} is not a directory.")
+            return
+
+        print(f"Checking folder: {folder_path}...")
+        
+        zero_byte_files = []
+        duplicate_files = []
+
+        try:
+            self._connect_db()
+            cursor = self.conn.cursor()
+
+            for root, _, files in os.walk(folder_path):
+                for filename in files:
+                    file_path = os.path.join(root, filename)
+                    
+                    # 1. Check for 0-byte files
+                    if os.path.getsize(file_path) == 0:
+                        zero_byte_files.append(file_path)
+                        continue
+
+                    # 2. Check if file already exists in repo
+                    file_id = self._calculate_file_id(file_path)
+                    cursor.execute("SELECT original_path, repo_name FROM files WHERE file_id = ?", (file_id,))
+                    existing = cursor.fetchone()
+                    if existing:
+                        duplicate_files.append({
+                            'new_path': file_path,
+                            'existing_path': existing[0],
+                            'repo': existing[1],
+                            'file_id': file_id
+                        })
+
+            print("\n--- Summary ---")
+            
+            if zero_byte_files:
+                print(f"\n[!] Found {len(zero_byte_files)} empty (0-byte) files:")
+                for f in zero_byte_files:
+                    print(f"  - {f}")
+            else:
+                print("\n[+] No empty files found.")
+
+            if duplicate_files:
+                print(f"\n[!] Found {len(duplicate_files)} duplicate files already in repository:")
+                for d in duplicate_files:
+                    print(f"  - New:      {d['new_path']}")
+                    print(f"    Existing: {d['existing_path']} (Repo: {d['repo']})")
+                    print(f"    Hash:     {d['file_id']}")
+            else:
+                print("\n[+] No duplicates found.")
+
+        except Exception as e:
+            print(f"Error during check: {e}")
+        finally:
+            self._close_db()
+
     def import_folder(self, repo_name, folder_path):
         if not os.path.isdir(folder_path):
             print(f"Error: {folder_path} is not a directory.")
@@ -355,6 +416,8 @@ def main():
     parser = argparse.ArgumentParser(description="Archival Repository Manager")
     subparsers = parser.add_subparsers(dest='command')
     subparsers.add_parser('init').add_argument('repo_name')
+    # Fixed: check command only takes folder_path, not repo_name
+    chk = subparsers.add_parser('check'); chk.add_argument('repo_name'); chk.add_argument('folder_path')
     imp = subparsers.add_parser('import'); imp.add_argument('repo_name'); imp.add_argument('folder_path')
     ad = subparsers.add_parser('add'); ad.add_argument('repo_name'); ad.add_argument('file_path')
     tg = subparsers.add_parser('tag'); tg.add_argument('repo_name'); tg.add_argument('file_id'); tg.add_argument('tag_name')
@@ -369,6 +432,7 @@ def main():
     try:
         manager = RepoManager()
         if args.command == 'init': manager.init(args.repo_name)
+        elif args.command == 'check': manager.check_folder(args.folder_path)
         elif args.command == 'import': manager.import_folder(args.repo_name, args.folder_path)
         elif args.command == 'add': manager.add(args.repo_name, args.file_path)
         elif args.command == 'tag': manager.tag(args.repo_name, args.file_id, args.tag_name)
