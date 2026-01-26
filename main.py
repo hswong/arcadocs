@@ -6,17 +6,26 @@ import shutil
 import stat
 import base64
 import getpass
+import zipfile
+import threading
+import time
 from datetime import datetime
+
+# Optional: For PDF password removal. 
+# Install with: pip install pikepdf
+try:
+    import pikepdf
+    HAS_PIKE = True
+except ImportError:
+    HAS_PIKE = False
 
 class RepoManager:
     """
-    Manages an archival repository using a SQLite database with encrypted credentials.
-    The master REPO_KEY is protected by a user-defined unlock password.
-    Credentials are stored in a pool to be tried against protected files.
+    Manages an archival repository with background processing for 
+    compressed files and password-protected PDFs.
     """
     
     def __init__(self):
-        """Initializes the RepoManager."""
         self.repo_root = os.environ.get('REPO_ROOT')
         if not self.repo_root:
             raise EnvironmentError("REPO_ROOT environment variable is not set.")
@@ -26,38 +35,24 @@ class RepoManager:
         self.repo_key = self._initialize_master_key()
         self.conn = None
         
-        # Auto-ensure schema on every instantiation to prevent "no such table" errors
         self._ensure_schema()
 
     def _initialize_master_key(self):
-        """Retrieves or creates the master encryption key."""
         env_key = os.environ.get('REPO_KEY')
-        if env_key:
-            return env_key
-
+        if env_key: return env_key
         if os.path.exists(self.config_path):
             password = getpass.getpass("Enter Master Password to unlock REPO_KEY: ")
             with open(self.config_path, "r") as f:
                 encrypted_master_key = f.read().strip()
-            
             decrypted = self._simple_decrypt_with_pass(encrypted_master_key, password)
-            if decrypted.startswith("VALID:"):
-                return decrypted[6:]
-            else:
-                print("Error: Invalid Master Password.")
-                exit(1)
-        
+            if decrypted.startswith("VALID:"): return decrypted[6:]
+            else: print("Error: Invalid Master Password."); exit(1)
         print("No REPO_KEY found. Initializing security configuration...")
-        new_key = getpass.getpass("Create a new REPO_KEY (Secret for file credentials): ")
-        new_pass = getpass.getpass("Create a Master Password to protect this REPO_KEY: ")
-        
+        new_key = getpass.getpass("Create a new REPO_KEY: ")
+        new_pass = getpass.getpass("Create a Master Password: ")
         encrypted_to_store = self._simple_encrypt_with_pass(f"VALID:{new_key}", new_pass)
-        
-        with open(self.config_path, "w") as f:
-            f.write(encrypted_to_store)
-        
+        with open(self.config_path, "w") as f: f.write(encrypted_to_store)
         os.chmod(self.config_path, stat.S_IRUSR | stat.S_IWUSR)
-        print(f"Master configuration saved to {self.config_path}")
         return new_key
 
     def _simple_encrypt_with_pass(self, plain_text, password):
@@ -70,46 +65,30 @@ class RepoManager:
             key = hashlib.sha256(password.encode()).hexdigest()
             decoded = base64.b64decode(cipher_text.encode()).decode()
             return self._cipher_logic(decoded, key)
-        except Exception:
-            return ""
+        except Exception: return ""
 
     def _cipher_logic(self, data, key):
         extended_key = (key * (len(data) // len(key) + 1))[:len(data)]
         return "".join(chr(ord(x) ^ ord(y)) for x, y in zip(data, extended_key))
 
-    def _cipher(self, data):
-        return self._cipher_logic(data, self.repo_key)
-
-    def _encrypt(self, plain_text):
-        ciphered = self._cipher(plain_text)
-        return base64.b64encode(ciphered.encode()).decode()
-
+    def _cipher(self, data): return self._cipher_logic(data, self.repo_key)
+    def _encrypt(self, plain_text): return base64.b64encode(self._cipher(plain_text).encode()).decode()
     def _decrypt(self, cipher_text):
-        try:
-            decoded = base64.b64decode(cipher_text.encode()).decode()
-            return self._cipher(decoded)
-        except Exception:
-            return "[Decryption Error: Key Mismatch]"
+        try: return self._cipher(base64.b64decode(cipher_text.encode()).decode())
+        except Exception: return "[Decryption Error]"
 
     def _connect_db(self):
         self.conn = sqlite3.connect(self.db_path)
         self.conn.execute("PRAGMA foreign_keys = ON;")
         
     def _close_db(self):
-        if self.conn:
-            self.conn.close()
+        if self.conn: self.conn.close()
 
     def _ensure_schema(self):
-        """Creates the database schema if it does not already exist."""
         try:
             self._connect_db()
             cursor = self.conn.cursor()
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS tags (
-                    tag_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    tag_name TEXT NOT NULL UNIQUE
-                )
-            ''')
+            cursor.execute('CREATE TABLE IF NOT EXISTS tags (tag_id INTEGER PRIMARY KEY AUTOINCREMENT, tag_name TEXT NOT NULL UNIQUE)')
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS files (
                     file_id TEXT PRIMARY KEY,
@@ -121,21 +100,19 @@ class RepoManager:
                     UNIQUE(repo_name, repo_path)
                 )
             ''')
+            cursor.execute('CREATE TABLE IF NOT EXISTS file_tags (file_id TEXT NOT NULL, tag_id INTEGER NOT NULL, PRIMARY KEY (file_id, tag_id), FOREIGN KEY (file_id) REFERENCES files(file_id) ON DELETE CASCADE, FOREIGN KEY (tag_id) REFERENCES tags(tag_id) ON DELETE CASCADE)')
+            cursor.execute('CREATE TABLE IF NOT EXISTS credentials (cred_id INTEGER PRIMARY KEY AUTOINCREMENT, credential_value TEXT NOT NULL UNIQUE, description TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)')
+            
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS file_tags (
+                CREATE TABLE IF NOT EXISTS jobs (
+                    job_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     file_id TEXT NOT NULL,
-                    tag_id INTEGER NOT NULL,
-                    PRIMARY KEY (file_id, tag_id),
-                    FOREIGN KEY (file_id) REFERENCES files(file_id) ON DELETE CASCADE,
-                    FOREIGN KEY (tag_id) REFERENCES tags(tag_id) ON DELETE CASCADE
-                )
-            ''')
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS credentials (
-                    cred_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    credential_value TEXT NOT NULL UNIQUE,
-                    description TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    job_type TEXT NOT NULL,
+                    status TEXT DEFAULT 'PENDING',
+                    attempts INTEGER DEFAULT 0,
+                    last_error TEXT,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (file_id) REFERENCES files(file_id) ON DELETE CASCADE
                 )
             ''')
             self.conn.commit()
@@ -146,12 +123,23 @@ class RepoManager:
         file_size = os.path.getsize(file_path)
         sha256_hash = hashlib.sha256()
         with open(file_path, "rb") as f:
-            for byte_block in iter(lambda: f.read(4096), b""):
-                sha256_hash.update(byte_block)
+            for byte_block in iter(lambda: f.read(4096), b""): sha256_hash.update(byte_block)
         return f"{file_size}_{sha256_hash.hexdigest()}"
 
+    def _queue_job(self, file_id, file_path):
+        """Detects if a job is needed and adds to queue."""
+        self._connect_db()
+        cursor = self.conn.cursor()
+        
+        if zipfile.is_zipfile(file_path):
+            cursor.execute("INSERT INTO jobs (file_id, job_type) VALUES (?, 'UNZIP')", (file_id,))
+        elif file_path.lower().endswith('.pdf'):
+            cursor.execute("INSERT INTO jobs (file_id, job_type) VALUES (?, 'DECRYPT_PDF')", (file_id,))
+            
+        self.conn.commit()
+        self._close_db()
+
     def init(self, repo_name):
-        """Initializes the directory for a new repository."""
         repo_path = os.path.join(self.repo_root, repo_name)
         if not os.path.exists(repo_path):
             os.makedirs(repo_path)
@@ -162,12 +150,8 @@ class RepoManager:
     def add_credential(self, password, description=None):
         try:
             self._connect_db()
-            cursor = self.conn.cursor()
             encrypted_val = self._encrypt(password)
-            cursor.execute('''
-                INSERT OR IGNORE INTO credentials (credential_value, description)
-                VALUES (?, ?)
-            ''', (encrypted_val, description))
+            self.conn.execute("INSERT OR IGNORE INTO credentials (credential_value, description) VALUES (?, ?)", (encrypted_val, description))
             self.conn.commit()
             print("Credential managed.")
         finally:
@@ -178,8 +162,7 @@ class RepoManager:
             self._connect_db()
             cursor = self.conn.cursor()
             cursor.execute("SELECT cred_id, credential_value, description FROM credentials")
-            rows = cursor.fetchall()
-            for row in rows:
+            for row in cursor.fetchall():
                 print(f"ID: {row[0]} | Cred: {self._decrypt(row[1])} | Desc: {row[2]}")
         finally:
             self._close_db()
@@ -187,135 +170,78 @@ class RepoManager:
     def del_credential(self, cred_id):
         try:
             self._connect_db()
-            cursor = self.conn.cursor()
-            cursor.execute("DELETE FROM credentials WHERE cred_id = ?", (cred_id,))
+            self.conn.execute("DELETE FROM credentials WHERE cred_id = ?", (cred_id,))
             self.conn.commit()
         finally:
             self._close_db()
 
     def _add_to_repo(self, repo_name, source_path, original_path):
-        """
-        Internal function to add a file to the repository.
-        Preserves original filename by placing it inside a unique file_id directory.
-        Prints duplicate paths if the hash already exists.
-        """
         try:
             self._connect_db()
             cursor = self.conn.cursor()
             repo_path_root = os.path.join(self.repo_root, repo_name)
-            if not os.path.exists(repo_path_root):
-                print(f"Error: Repo '{repo_name}' not initialized. Run init first.")
-                return False
+            if not os.path.exists(repo_path_root): return False
 
             file_id = self._calculate_file_id(source_path)
             
-            # Check for duplicates by hash
-            cursor.execute("SELECT original_path, repo_name FROM files WHERE file_id = ?", (file_id,))
+            # Check for existing file record
+            cursor.execute("SELECT repo_path, repo_name FROM files WHERE file_id = ?", (file_id,))
             existing = cursor.fetchone()
             if existing:
-                print(f"Duplicate detected (Hash: {file_id})")
-                print(f"  Existing file: {existing[0]} (in repo: {existing[1]})")
-                print(f"  Skipping new: {source_path}")
-                return False
+                print(f"Duplicate detected: {file_id}. Already in repo '{existing[1]}'.")
+                return file_id # Return file_id to allow tagging of existing file
 
-            # Get the original filename from the source path
             original_filename = os.path.basename(source_path)
-            
-            # Create a directory named after the file_id to store the file
             file_storage_dir = os.path.join(repo_path_root, file_id)
-            if not os.path.exists(file_storage_dir):
-                os.makedirs(file_storage_dir)
+            if not os.path.exists(file_storage_dir): os.makedirs(file_storage_dir)
             
             repo_file_path = os.path.join(file_storage_dir, original_filename)
             shutil.copy2(source_path, repo_file_path)
 
-            # Store the relative path within the repo
             db_repo_path = os.path.join(repo_name, file_id, original_filename)
-
-            cursor.execute('''
-                INSERT INTO files (file_id, repo_name, original_path, repo_path)
-                VALUES (?, ?, ?, ?)
-            ''', (file_id, repo_name, original_path, db_repo_path))
-            
+            cursor.execute('INSERT INTO files (file_id, repo_name, original_path, repo_path) VALUES (?, ?, ?, ?)', 
+                           (file_id, repo_name, original_path, db_repo_path))
             self.conn.commit()
-            print(f"File added: {file_id} (Stored as: {original_filename})")
-            return True
-        except Exception as e:
-            print(f"Error: {e}")
-            return False
-        finally:
             self._close_db()
+            
+            self._queue_job(file_id, repo_file_path)
+            print(f"File added: {file_id}")
+            return file_id
+        except Exception as e:
+            print(f"Error adding: {e}")
+            return None
 
     def check_folder(self, folder_path):
-        """
-        Scans a folder for 0-byte files and files already existing in the repository.
-        """
         if not os.path.isdir(folder_path):
             print(f"Error: {folder_path} is not a directory.")
             return
-
-        print(f"Checking folder: {folder_path}...")
-        
-        zero_byte_files = []
-        duplicate_files = []
-
+        print(f"Checking {folder_path}...")
         try:
             self._connect_db()
             cursor = self.conn.cursor()
-
             for root, _, files in os.walk(folder_path):
                 for filename in files:
                     file_path = os.path.join(root, filename)
-                    
-                    # 1. Check for 0-byte files
                     if os.path.getsize(file_path) == 0:
-                        zero_byte_files.append(file_path)
+                        print(f"[!] Empty file: {file_path}")
                         continue
-
-                    # 2. Check if file already exists in repo
-                    file_id = self._calculate_file_id(file_path)
-                    cursor.execute("SELECT original_path, repo_name FROM files WHERE file_id = ?", (file_id,))
+                    fid = self._calculate_file_id(file_path)
+                    cursor.execute("SELECT original_path, repo_name FROM files WHERE file_id = ?", (fid,))
                     existing = cursor.fetchone()
                     if existing:
-                        duplicate_files.append({
-                            'new_path': file_path,
-                            'existing_path': existing[0],
-                            'repo': existing[1],
-                            'file_id': file_id
-                        })
-
-            print("\n--- Summary ---")
-            
-            if zero_byte_files:
-                print(f"\n[!] Found {len(zero_byte_files)} empty (0-byte) files:")
-                for f in zero_byte_files:
-                    print(f"  - {f}")
-            else:
-                print("\n[+] No empty files found.")
-
-            if duplicate_files:
-                print(f"\n[!] Found {len(duplicate_files)} duplicate files already in repository:")
-                for d in duplicate_files:
-                    print(f"  - New:      {d['new_path']}")
-                    print(f"    Existing: {d['existing_path']} (Repo: {d['repo']})")
-                    print(f"    Hash:     {d['file_id']}")
-            else:
-                print("\n[+] No duplicates found.")
-
-        except Exception as e:
-            print(f"Error during check: {e}")
+                        print(f"[!] Duplicate: {file_path} (In repo: {existing[1]})")
         finally:
             self._close_db()
 
     def import_folder(self, repo_name, folder_path):
         if not os.path.isdir(folder_path):
-            print(f"Error: {folder_path} is not a directory.")
+            print(f"Error: '{folder_path}' is not a valid directory. Import aborted.")
             return
             
         self._connect_db()
-        cursor = self.conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO tags (tag_name) VALUES (?)", (folder_path,))
+        self.conn.execute("INSERT OR IGNORE INTO tags (tag_name) VALUES (?)", (folder_path,))
         self.conn.commit()
+        cursor = self.conn.cursor()
         cursor.execute("SELECT tag_id FROM tags WHERE tag_name = ?", (folder_path,))
         tag_id = cursor.fetchone()[0]
         self._close_db()
@@ -324,8 +250,8 @@ class RepoManager:
             for filename in files:
                 file_path = os.path.join(root, filename)
                 rel_path = os.path.relpath(file_path, folder_path)
-                if self._add_to_repo(repo_name, file_path, rel_path):
-                    fid = self._calculate_file_id(file_path)
+                fid = self._add_to_repo(repo_name, file_path, rel_path)
+                if fid:
                     self._connect_db()
                     self.conn.execute("INSERT OR IGNORE INTO file_tags (file_id, tag_id) VALUES (?, ?)", (fid, tag_id))
                     self.conn.commit()
@@ -334,6 +260,8 @@ class RepoManager:
     def add(self, repo_name, file_path):
         if os.path.isfile(file_path):
             self._add_to_repo(repo_name, file_path, file_path)
+        else:
+            print(f"Error: '{file_path}' is not a valid file.")
 
     def tag(self, repo_name, file_id, tag_name):
         try:
@@ -356,13 +284,7 @@ class RepoManager:
             if res:
                 full_path = os.path.join(self.repo_root, res[0])
                 storage_dir = os.path.dirname(full_path)
-                
-                # Use shutil.rmtree on the storage_dir to remove the ID folder and its content
-                if os.path.exists(storage_dir) and os.path.isdir(storage_dir):
-                    shutil.rmtree(storage_dir)
-                elif os.path.exists(full_path):
-                    os.remove(full_path)
-                    
+                if os.path.exists(storage_dir): shutil.rmtree(storage_dir)
                 cursor.execute("DELETE FROM files WHERE file_id = ?", (file_id,))
                 self.conn.commit()
                 print(f"Removed {file_id}")
@@ -372,8 +294,7 @@ class RepoManager:
     def del_tag(self, repo_name, file_id, tag_name):
         try:
             self._connect_db()
-            cursor = self.conn.cursor()
-            cursor.execute("DELETE FROM file_tags WHERE file_id = ? AND tag_id IN (SELECT tag_id FROM tags WHERE tag_name = ?)", (file_id, tag_name))
+            self.conn.execute("DELETE FROM file_tags WHERE file_id = ? AND tag_id IN (SELECT tag_id FROM tags WHERE tag_name = ?)", (file_id, tag_name))
             self.conn.commit()
         finally:
             self._close_db()
@@ -388,21 +309,14 @@ class RepoManager:
             
             old_full_path = os.path.join(self.repo_root, source[0])
             filename = os.path.basename(old_full_path)
-            
             target_storage_dir = os.path.join(self.repo_root, target_repo, file_id)
-            if not os.path.exists(target_storage_dir):
-                os.makedirs(target_storage_dir)
+            if not os.path.exists(target_storage_dir): os.makedirs(target_storage_dir)
             
             new_repo_path = os.path.join(target_repo, file_id, filename)
-            new_full_path = os.path.join(self.repo_root, new_repo_path)
-            
-            # If the source path is actually a file, move it. If it's the dir, handle accordingly.
-            if os.path.isfile(old_full_path):
-                shutil.move(old_full_path, new_full_path)
+            shutil.move(old_full_path, os.path.join(self.repo_root, new_repo_path))
             
             old_storage_dir = os.path.dirname(old_full_path)
-            if os.path.exists(old_storage_dir) and os.path.isdir(old_storage_dir) and not os.listdir(old_storage_dir):
-                os.rmdir(old_storage_dir)
+            if not os.listdir(old_storage_dir): os.rmdir(old_storage_dir)
 
             cursor.execute("UPDATE files SET status = 'MOVED' WHERE file_id = ? AND repo_name = ?", (file_id, source_repo))
             cursor.execute("INSERT INTO files (file_id, repo_name, original_path, repo_path) VALUES (?, ?, ?, ?)", 
@@ -412,12 +326,92 @@ class RepoManager:
         finally:
             self._close_db()
 
+    def process_jobs(self):
+        """Worker loop to process pending jobs."""
+        print("Starting job processor... (Ctrl+C to stop)")
+        while True:
+            try:
+                self._connect_db()
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT job_id, file_id, job_type, attempts FROM jobs WHERE status = 'PENDING' LIMIT 1")
+                job = cursor.fetchone()
+                self._close_db()
+
+                if not job:
+                    time.sleep(5)
+                    continue
+
+                job_id, file_id, job_type, attempts = job
+                success, error_msg = False, ""
+
+                self._connect_db()
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT repo_path, repo_name FROM files WHERE file_id = ?", (file_id,))
+                file_info = cursor.fetchone()
+                self._close_db()
+
+                if file_info:
+                    full_path = os.path.join(self.repo_root, file_info[0])
+                    repo_name = file_info[1]
+                    if job_type == 'UNZIP': success, error_msg = self._handle_unzip(repo_name, full_path)
+                    elif job_type == 'DECRYPT_PDF': success, error_msg = self._handle_pdf_decrypt(full_path)
+
+                self._connect_db()
+                if success:
+                    self.conn.execute("UPDATE jobs SET status = 'COMPLETED', updated_at = CURRENT_TIMESTAMP WHERE job_id = ?", (job_id,))
+                else:
+                    status = 'FAILED' if attempts >= 5 else 'PENDING'
+                    self.conn.execute("UPDATE jobs SET status = ?, attempts = attempts + 1, last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE job_id = ?", 
+                                   (status, error_msg, job_id))
+                self.conn.commit()
+                self._close_db()
+            except KeyboardInterrupt: break
+            except Exception as e:
+                print(f"Worker Error: {e}")
+                time.sleep(5)
+
+    def _handle_unzip(self, repo_name, zip_path):
+        try:
+            extract_to = zip_path + "_extracted"
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref: zip_ref.extractall(extract_to)
+            for root, _, files in os.walk(extract_to):
+                for f in files:
+                    child_path = os.path.join(root, f)
+                    self._add_to_repo(repo_name, child_path, f"EXTRACTED/{os.path.relpath(child_path, extract_to)}")
+            shutil.rmtree(extract_to)
+            return True, ""
+        except Exception as e: return False, str(e)
+
+    def _handle_pdf_decrypt(self, pdf_path):
+        if not HAS_PIKE: return False, "pikepdf not installed"
+        try:
+            try:
+                with pikepdf.open(pdf_path) as pdf: return True, "Already decrypted"
+            except pikepdf.PasswordError: pass
+
+            self._connect_db()
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT credential_value FROM credentials")
+            creds = [self._decrypt(r[0]) for r in cursor.fetchall()]
+            self._close_db()
+
+            for password in creds:
+                try:
+                    with pikepdf.open(pdf_path, password=password) as pdf:
+                        temp_path = pdf_path + ".unlocked"
+                        pdf.save(temp_path)
+                        os.replace(temp_path, pdf_path)
+                        return True, ""
+                except pikepdf.PasswordError: continue
+            return False, "No valid password found"
+        except Exception as e: return False, str(e)
+
 def main():
     parser = argparse.ArgumentParser(description="Archival Repository Manager")
     subparsers = parser.add_subparsers(dest='command')
     subparsers.add_parser('init').add_argument('repo_name')
-    # Fixed: check command only takes folder_path, not repo_name
-    chk = subparsers.add_parser('check'); chk.add_argument('repo_name'); chk.add_argument('folder_path')
+    subparsers.add_parser('check').add_argument('folder_path')
+    subparsers.add_parser('worker')
     imp = subparsers.add_parser('import'); imp.add_argument('repo_name'); imp.add_argument('folder_path')
     ad = subparsers.add_parser('add'); ad.add_argument('repo_name'); ad.add_argument('file_path')
     tg = subparsers.add_parser('tag'); tg.add_argument('repo_name'); tg.add_argument('file_id'); tg.add_argument('tag_name')
@@ -429,21 +423,19 @@ def main():
     cd = subparsers.add_parser('del-cred'); cd.add_argument('cred_id', type=int)
 
     args = parser.parse_args()
-    try:
-        manager = RepoManager()
-        if args.command == 'init': manager.init(args.repo_name)
-        elif args.command == 'check': manager.check_folder(args.folder_path)
-        elif args.command == 'import': manager.import_folder(args.repo_name, args.folder_path)
-        elif args.command == 'add': manager.add(args.repo_name, args.file_path)
-        elif args.command == 'tag': manager.tag(args.repo_name, args.file_id, args.tag_name)
-        elif args.command == 'remove': manager.remove(args.repo_name, args.file_id)
-        elif args.command == 'del-tag': manager.del_tag(args.repo_name, args.file_id, args.tag_name)
-        elif args.command == 'move': manager.move(args.source_repo, args.file_id, args.target_repo)
-        elif args.command == 'add-cred': manager.add_credential(args.password, args.desc)
-        elif args.command == 'list-creds': manager.list_credentials()
-        elif args.command == 'del-cred': manager.del_credential(args.cred_id)
-    except Exception as e:
-        print(f"Operational Error: {e}")
+    manager = RepoManager()
+    if args.command == 'init': manager.init(args.repo_name)
+    elif args.command == 'check': manager.check_folder(args.folder_path)
+    elif args.command == 'worker': manager.process_jobs()
+    elif args.command == 'import': manager.import_folder(args.repo_name, args.folder_path)
+    elif args.command == 'add': manager.add(args.repo_name, args.file_path)
+    elif args.command == 'tag': manager.tag(args.repo_name, args.file_id, args.tag_name)
+    elif args.command == 'remove': manager.remove(args.repo_name, args.file_id)
+    elif args.command == 'del-tag': manager.del_tag(args.repo_name, args.file_id, args.tag_name)
+    elif args.command == 'move': manager.move(args.source_repo, args.file_id, args.target_repo)
+    elif args.command == 'add-cred': manager.add_credential(args.password, args.desc)
+    elif args.command == 'list-creds': manager.list_credentials()
+    elif args.command == 'del-cred': manager.del_credential(args.cred_id)
 
 if __name__ == "__main__":
     main()
