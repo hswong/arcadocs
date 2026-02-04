@@ -225,11 +225,14 @@ class RepoManager:
                     if os.path.getsize(file_path) == 0:
                         print(f"[!] Empty file: {file_path}")
                         continue
+                    if zipfile.is_zipfile(file_path):
+                        print(f"[!] Zip file: {file_path}")
+                        
                     fid = self._calculate_file_id(file_path)
                     cursor.execute("SELECT original_path, repo_name FROM files WHERE file_id = ?", (fid,))
                     existing = cursor.fetchone()
                     if existing:
-                        print(f"[!] Duplicate: {file_path} (In repo: {existing[1]})")
+                        print(f"[!] Duplicate: {file_path} ({existing[0]} in repo: {existing[1]})")
         finally:
             self._close_db()
 
