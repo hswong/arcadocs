@@ -137,24 +137,32 @@ class RepoManager:
                     return 'ZIP'
                 if header.startswith(b'%PDF'):
                     return 'PDF'
+                if header.startswith(b'Rar!'):
+                    return 'RAR'
+                if header.startswith(b'7z\xbc\xaf\x27\x1c'):
+                    return '7Z'
                 
+                # Check if it looks like binary (presence of null bytes or non-text control chars)
+                # Most text files don't have null bytes \x00
+                if b'\x00' in header:
+                    return 'UNKNOWN'
+
                 # Text-based detection
                 try:
-                    content_str = header.decode('utf-8', errors='ignore').strip()
+                    content_str = header.decode('utf-8').strip()
                     content_lower = content_str.lower()
                     
                     if content_lower.startswith(('<!doctype html', '<html')):
                         return 'HTML'
                     
-                    # Basic CSV detection: contains commas and newlines, looks like data rows
+                    # More strict CSV detection: check consistency of column count in first few lines
                     if ',' in content_str and '\n' in content_str:
-                        lines = content_str.split('\n')
-                        if len(lines) > 1 and all(',' in line for line in lines[:2] if line.strip()):
-                            return 'CSV'
+                        lines = [l for l in content_str.split('\n') if l.strip()]
+                        if len(lines) > 1:
+                            col_counts = [l.count(',') for l in lines[:3]]
+                            if all(c > 0 for c in col_counts) and len(set(col_counts)) == 1:
+                                return 'CSV'
                     
-                    # Fallback to general TEXT if it's valid UTF-8 and not binary
-                    f.seek(0)
-                    f.read().decode('utf-8')
                     return 'TEXT'
                 except UnicodeDecodeError:
                     pass
