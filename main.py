@@ -126,14 +126,53 @@ class RepoManager:
             for byte_block in iter(lambda: f.read(4096), b""): sha256_hash.update(byte_block)
         return f"{file_size}_{sha256_hash.hexdigest()}"
 
+    def _get_file_type_by_magic(self, file_path):
+        """Identifies file type using magic numbers (file signatures) and content inspection."""
+        try:
+            with open(file_path, 'rb') as f:
+                header = f.read(2048)
+                # Binary Signatures
+                if header.startswith(b'PK\x03\x04'):
+                    if b'xl/' in header: return 'XLSX'
+                    return 'ZIP'
+                if header.startswith(b'%PDF'):
+                    return 'PDF'
+                
+                # Text-based detection
+                try:
+                    content_str = header.decode('utf-8', errors='ignore').strip()
+                    content_lower = content_str.lower()
+                    
+                    if content_lower.startswith(('<!doctype html', '<html')):
+                        return 'HTML'
+                    
+                    # Basic CSV detection: contains commas and newlines, looks like data rows
+                    if ',' in content_str and '\n' in content_str:
+                        lines = content_str.split('\n')
+                        if len(lines) > 1 and all(',' in line for line in lines[:2] if line.strip()):
+                            return 'CSV'
+                    
+                    # Fallback to general TEXT if it's valid UTF-8 and not binary
+                    f.seek(0)
+                    f.read().decode('utf-8')
+                    return 'TEXT'
+                except UnicodeDecodeError:
+                    pass
+        except Exception:
+            pass
+        return 'UNKNOWN'
+
     def _queue_job(self, file_id, file_path):
-        """Detects if a job is needed and adds to queue."""
+        """Detects if a job is needed based on file magic and adds to queue."""
+        file_type = self._get_file_type_by_magic(file_path)
+        
         self._connect_db()
         cursor = self.conn.cursor()
         
-        if zipfile.is_zipfile(file_path):
+        # We only queue UNZIP if it is a standard ZIP, not an XLSX
+        if file_type == 'ZIP':
             cursor.execute("INSERT INTO jobs (file_id, job_type) VALUES (?, 'UNZIP')", (file_id,))
-        elif file_path.lower().endswith('.pdf'):
+        elif file_type == 'PDF':
             cursor.execute("INSERT INTO jobs (file_id, job_type) VALUES (?, 'DECRYPT_PDF')", (file_id,))
             
         self.conn.commit()
@@ -222,17 +261,22 @@ class RepoManager:
             for root, _, files in os.walk(folder_path):
                 for filename in files:
                     file_path = os.path.join(root, filename)
+                    # Get file type using magic bytes
+                    file_type = self._get_file_type_by_magic(file_path)
+                    
                     if os.path.getsize(file_path) == 0:
-                        print(f"[!] Empty file: {file_path}")
+                        print(f"[!] Empty file [{file_type}]: {file_path}")
                         continue
-                    if zipfile.is_zipfile(file_path):
-                        print(f"[!] Zip file: {file_path}")
                         
                     fid = self._calculate_file_id(file_path)
                     cursor.execute("SELECT original_path, repo_name FROM files WHERE file_id = ?", (fid,))
                     existing = cursor.fetchone()
+                    
+                    status_msg = f"OK [{file_type}]"
                     if existing:
-                        print(f"[!] Duplicate: {file_path} ({existing[0]} in repo: {existing[1]})")
+                        status_msg = f"DUPLICATE [{file_type}] (In repo: {existing[1]})"
+                    
+                    print(f"{status_msg}: {file_path}")
         finally:
             self._close_db()
 
