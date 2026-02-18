@@ -116,47 +116,6 @@ async def get_jobs():
         """).fetchall()
         return [dict(row) for row in rows]
 
-# --- Legacy Migration Logic ---
-def legacy_decrypt(cipher_text, password):
-    """Reimplementation of the original XOR logic for migration purposes."""
-    def cipher_logic(data, key):
-        extended_key = (key * (len(data) // len(key) + 1))[:len(data)]
-        return "".join(chr(ord(x) ^ ord(y)) for x, y in zip(data, extended_key))
-    
-    try:
-        key = hashlib.sha256(password.encode()).hexdigest()
-        decoded = base64.b64decode(cipher_text.encode()).decode()
-        return cipher_logic(decoded, key)
-    except Exception:
-        return ""
-
-def migrate_security():
-    """Migrates .repo_config from legacy XOR to new cryptography implementation."""
-    config_path = os.path.join(REPO_ROOT, ".repo_config")
-    if not os.path.exists(config_path):
-        print("Error: No .repo_config found to migrate.")
-        return
-
-    print("--- Security Migration ---")
-    password = getpass.getpass("Enter existing Master Password: ")
-    
-    with open(config_path, "r") as f:
-        legacy_data = f.read().strip()
-    
-    decrypted = legacy_decrypt(legacy_data, password)
-    
-    if decrypted.startswith("VALID:"):
-        repo_key = decrypted[6:]
-        print("Legacy key successfully decrypted. Upgrading to new format...")
-        
-        # Initialize the new security implementation with the old key and password
-        # This will overwrite .repo_config using the new more secure logic
-        security.initialize(password, existing_key=repo_key)
-        print("Migration complete. Your .repo_config now uses the upgraded implementation.")
-    else:
-        print("Error: Invalid password or incompatible legacy format.")
-        sys.exit(1)
-
 # --- Worker Logic ---
 def process_pdf(pdf_path: str):
     debug_log(f"Attempting PDF decryption for: {pdf_path}")
@@ -274,7 +233,6 @@ def main():
     
     sub.add_parser("server", help="Run the FastAPI web server")
     sub.add_parser("worker", help="Run the background job processor")
-    sub.add_parser("migrate", help="Migrate legacy XOR security to modern cryptography")
     
     add_parser = sub.add_parser("add", help="Add a file to a repository")
     add_parser.add_argument("repo", help="Target repository name")
@@ -298,11 +256,6 @@ def main():
 
     # Ensure infrastructure is ready
     db.init_db()
-
-    # Special handling for migrate command so it doesn't trigger a standard unlock
-    if args.cmd == "migrate":
-        migrate_security()
-        return
 
     run_security_prompt()
 
