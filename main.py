@@ -7,10 +7,11 @@ import argparse
 import shutil
 import hashlib
 import base64
+import threading
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -27,7 +28,9 @@ DB_PATH = os.path.join(REPO_ROOT, "repo.db")
 security = RepoSecurity(REPO_ROOT)
 db = DatabaseManager(DB_PATH)
 
-# Global debug flag
+# Global State for Integrated Worker
+worker_thread = None
+worker_active = False
 DEBUG_MODE = False
 
 def debug_log(message: str):
@@ -67,7 +70,10 @@ async def get_stats():
                 (SELECT COUNT(DISTINCT repo) FROM files) as total_repos,
                 (SELECT COUNT(*) FROM jobs WHERE status = 'PENDING') as pending_jobs
         """).fetchone()
-    return dict(res)
+    
+    stats = dict(res)
+    stats["worker_active"] = worker_active
+    return stats
 
 @app.get("/api/files")
 async def get_files(repo: Optional[str] = None):
@@ -108,13 +114,33 @@ async def get_jobs():
     """Returns the current background job queue."""
     debug_log("Fetching job queue.")
     with db.get_connection() as conn:
-        # Note: Removing created_at and updated_at to match current schema
         rows = conn.execute("""
             SELECT id, job_type, status, attempts, last_error
             FROM jobs 
             ORDER BY id DESC
         """).fetchall()
         return [dict(row) for row in rows]
+
+@app.post("/api/worker/start")
+async def start_integrated_worker():
+    """Starts the worker thread if it's not already running."""
+    global worker_thread, worker_active
+    if worker_active:
+        return {"status": "already running"}
+    
+    worker_active = True
+    worker_thread = threading.Thread(target=run_worker, daemon=True)
+    worker_thread.start()
+    debug_log("Integrated worker started via API.")
+    return {"status": "started"}
+
+@app.post("/api/worker/stop")
+async def stop_integrated_worker():
+    """Signals the worker thread to stop."""
+    global worker_active
+    worker_active = False
+    debug_log("Integrated worker stop signal sent via API.")
+    return {"status": "stopping"}
 
 # --- Worker Logic ---
 def process_pdf(pdf_path: str):
@@ -145,8 +171,9 @@ def process_pdf(pdf_path: str):
         return False, str(e)
 
 def run_worker():
+    global worker_active
     print(f"Worker active. Monitoring {DB_PATH}...")
-    while True:
+    while worker_active:
         try:
             with db.get_connection() as conn:
                 cursor = conn.cursor()
@@ -175,6 +202,7 @@ def run_worker():
         except Exception as e:
             print(f"Worker error: {e}")
             time.sleep(5)
+    print("Worker thread stopped.")
 
 # --- CLI Orchestration ---
 def run_security_prompt():
@@ -264,6 +292,9 @@ def main():
         import uvicorn
         uvicorn.run(app, host="0.0.0.0", port=8000)
     elif args.cmd == "worker":
+        # Keep stand-alone worker support
+        global worker_active
+        worker_active = True
         run_worker()
     elif args.cmd == "add":
         add_file(args.repo, args.path)
