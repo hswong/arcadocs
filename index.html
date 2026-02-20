@@ -24,6 +24,14 @@
         .status-pill-failed { background: #fee2e2; color: #991b1b; }
         .status-pill-processing { background: #eff6ff; color: #1e40af; }
         .status-pill-active { background: #eff6ff; color: #1e40af; }
+        
+        @keyframes spin-slow {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        .animate-spin-slow {
+            animation: spin-slow 2s linear infinite;
+        }
     </style>
 </head>
 <body class="bg-slate-50 min-h-screen">
@@ -63,7 +71,6 @@
 
         <!-- Main Content -->
         <main class="flex-1 overflow-y-auto p-8">
-            <!-- Header -->
             <header class="flex justify-between items-center mb-8">
                 <div>
                     <h1 id="tab-title" class="text-2xl font-bold text-gray-900">Dashboard</h1>
@@ -71,7 +78,7 @@
                 </div>
                 <div class="flex gap-3">
                     <button onclick="refreshData()" class="flex items-center gap-2 bg-white px-4 py-2 rounded-lg border shadow-sm hover:bg-gray-50 transition-all text-sm font-medium">
-                        <i data-lucide="refresh-cw" class="w-4 h-4"></i> Sync
+                        <i data-lucide="refresh-cw" class="w-4 h-4" id="sync-icon"></i> Sync
                     </button>
                 </div>
             </header>
@@ -110,7 +117,7 @@
                     <div class="bg-white p-6 rounded-2xl border shadow-sm flex flex-col justify-between">
                         <div class="flex justify-between items-center mb-4">
                             <div id="worker-icon-bg" class="bg-gray-100 p-3 rounded-xl text-gray-600 transition-colors">
-                                <i data-lucide="cpu"></i>
+                                <i data-lucide="cpu" id="worker-icon"></i>
                             </div>
                             <button id="worker-toggle-btn" onclick="toggleWorker()" class="px-4 py-1.5 rounded-full text-xs font-bold transition-all border shadow-sm">
                                 ...
@@ -127,9 +134,7 @@
                     <div class="p-6 border-b flex justify-between items-center">
                         <h2 class="font-bold text-gray-800">Recent Activity</h2>
                     </div>
-                    <div class="divide-y" id="recent-activity-list">
-                        <!-- Activity items -->
-                    </div>
+                    <div class="divide-y" id="recent-activity-list"></div>
                 </div>
             </section>
 
@@ -154,9 +159,7 @@
                                 <th class="px-6 py-4">Actions</th>
                             </tr>
                         </thead>
-                        <tbody class="divide-y text-sm" id="files-table-body">
-                            <!-- Rows injected by JS -->
-                        </tbody>
+                        <tbody class="divide-y text-sm" id="files-table-body"></tbody>
                     </table>
                 </div>
             </section>
@@ -167,20 +170,18 @@
                     <i data-lucide="shield-alert" class="w-6 h-6 shrink-0"></i>
                     <div>
                         <p class="font-bold">Encryption Active</p>
-                        <p class="text-sm">All credentials listed below are encrypted using your REPO_KEY. The background worker uses these to unlock protected PDFs.</p>
+                        <p class="text-sm">Credentials are encrypted with your system key. They are used automatically when a job encounters a password-protected file.</p>
                     </div>
                 </div>
                 <div class="bg-white p-6 rounded-2xl border shadow-sm">
                     <h3 class="font-bold mb-4">Add New Credential</h3>
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <input type="password" id="cred-pass" placeholder="Password / Secret" class="px-4 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500">
-                        <input type="text" id="cred-desc" placeholder="Description (e.g. Bank Statements 2023)" class="px-4 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500">
+                        <input type="text" id="cred-desc" placeholder="Description (e.g. Bank Statements)" class="px-4 py-2 border rounded-lg outline-none focus:ring-2 focus:ring-blue-500">
                     </div>
                     <button onclick="addCredential()" class="mt-4 bg-blue-600 text-white px-6 py-2 rounded-lg font-medium hover:bg-blue-700 transition-all">Save Credential</button>
                 </div>
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" id="credentials-list">
-                    <!-- Cards injected by JS -->
-                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" id="credentials-list"></div>
             </section>
 
             <!-- Jobs View -->
@@ -193,46 +194,32 @@
                                 <th class="px-6 py-4">Type</th>
                                 <th class="px-6 py-4">Status</th>
                                 <th class="px-6 py-4">Attempts</th>
-                                <th class="px-6 py-4">Info</th>
+                                <th class="px-6 py-4">Info / Actions</th>
                             </tr>
                         </thead>
-                        <tbody class="divide-y text-sm" id="jobs-table-body">
-                            <!-- Rows injected by JS -->
-                        </tbody>
+                        <tbody class="divide-y text-sm" id="jobs-table-body"></tbody>
                     </table>
                 </div>
             </section>
         </main>
     </div>
 
-    <!-- UI Logic -->
     <script>
         const API_BASE = "http://localhost:8000/api";
 
         let appState = {
             currentTab: 'dashboard',
-            stats: {
-                total_files: 0,
-                total_repos: 0,
-                pending_jobs: 0,
-                worker_active: false
-            },
-            data: {
-                files: [],
-                credentials: [],
-                jobs: []
-            }
+            stats: { total_files: 0, total_repos: 0, pending_jobs: 0, worker_active: false },
+            data: { files: [], credentials: [], jobs: [] }
         };
 
         function switchTab(tabId) {
             appState.currentTab = tabId;
-            
             document.querySelectorAll('.tab-view').forEach(v => v.classList.add('hidden'));
             document.getElementById(`view-${tabId}`).classList.remove('hidden');
-            
             document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
             document.getElementById(`nav-${tabId}`).classList.add('active');
-
+            
             const titles = {
                 dashboard: ['Dashboard', 'Overview of your archival status'],
                 files: ['Files & Repositories', 'Manage your archived data and tags'],
@@ -241,11 +228,12 @@
             };
             document.getElementById('tab-title').innerText = titles[tabId][0];
             document.getElementById('tab-subtitle').innerText = titles[tabId][1];
-
             renderData(tabId);
         }
 
         async function refreshData() {
+            const syncIcon = document.getElementById('sync-icon');
+            syncIcon.classList.add('animate-spin');
             try {
                 const [statsRes, filesRes, credsRes, jobsRes] = await Promise.all([
                     fetch(`${API_BASE}/stats`),
@@ -253,66 +241,60 @@
                     fetch(`${API_BASE}/credentials`),
                     fetch(`${API_BASE}/jobs`)
                 ]);
-
-                if (!statsRes.ok || !filesRes.ok || !credsRes.ok || !jobsRes.ok) {
-                    throw new Error("One or more requests failed");
-                }
-
                 appState.stats = await statsRes.json();
                 appState.data.files = await filesRes.json();
                 appState.data.credentials = await credsRes.json();
                 appState.data.jobs = await jobsRes.json();
-
                 renderData(appState.currentTab);
                 updateIndicator(true);
             } catch (error) {
-                console.error("Failed to sync with backend:", error);
                 updateIndicator(false);
+            } finally {
+                setTimeout(() => syncIcon.classList.remove('animate-spin'), 500);
             }
         }
 
-        function updateIndicator(online) {
-            const indicator = document.getElementById('system-status-indicator');
-            if (online) {
-                indicator.innerHTML = '<span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span> Backend Connected';
-                indicator.className = "flex items-center gap-2 text-blue-700";
-            } else {
-                indicator.innerHTML = '<span class="w-2 h-2 bg-red-500 rounded-full"></span> Backend Offline';
-                indicator.className = "flex items-center gap-2 text-red-700";
+        async function retryJob(jobId) {
+            try {
+                const res = await fetch(`${API_BASE}/jobs/${jobId}/retry`, { method: 'POST' });
+                if (res.ok) await refreshData();
+            } catch (err) {
+                console.error("Retry error:", err);
             }
         }
 
         async function toggleWorker() {
             const endpoint = appState.stats.worker_active ? 'stop' : 'start';
             try {
-                const res = await fetch(`${API_BASE}/worker/${endpoint}`, { method: 'POST' });
-                if (res.ok) await refreshData();
-            } catch (err) {
-                console.error("Worker toggle error:", err);
-            }
+                await fetch(`${API_BASE}/worker/${endpoint}`, { method: 'POST' });
+                await refreshData();
+            } catch (err) { console.error(err); }
         }
 
         async function addCredential() {
             const pass = document.getElementById('cred-pass').value;
             const desc = document.getElementById('cred-desc').value;
-            
             if (!pass || !desc) return;
-
             try {
-                const response = await fetch(`${API_BASE}/credentials`, {
+                const res = await fetch(`${API_BASE}/credentials`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ password: pass, description: desc })
                 });
-
-                if (response.ok) {
+                if (res.ok) {
                     document.getElementById('cred-pass').value = '';
                     document.getElementById('cred-desc').value = '';
                     await refreshData();
                 }
-            } catch (err) {
-                console.error("Add Credential Error:", err);
-            }
+            } catch (err) { console.error(err); }
+        }
+
+        function updateIndicator(online) {
+            const indicator = document.getElementById('system-status-indicator');
+            indicator.innerHTML = online 
+                ? '<span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span> Backend Connected'
+                : '<span class="w-2 h-2 bg-red-500 rounded-full"></span> Backend Offline';
+            indicator.className = `flex items-center gap-2 ${online ? 'text-blue-700' : 'text-red-700'}`;
         }
 
         function renderData(tabId) {
@@ -323,101 +305,76 @@
 
                 const workerStatus = document.getElementById('worker-status-text');
                 const workerBtn = document.getElementById('worker-toggle-btn');
-                const workerIcon = document.getElementById('worker-icon-bg');
+                const workerIconBg = document.getElementById('worker-icon-bg');
+                const workerIcon = document.getElementById('worker-icon');
 
                 if (appState.stats.worker_active) {
                     workerStatus.innerText = "Running";
                     workerStatus.className = "text-sm font-bold mt-1 text-green-600";
                     workerBtn.innerText = "Stop Worker";
                     workerBtn.className = "px-4 py-1.5 rounded-full text-xs font-bold bg-white text-red-600 border-red-200 hover:bg-red-50 transition-all border shadow-sm";
-                    workerIcon.className = "bg-green-100 p-3 rounded-xl text-green-600 transition-colors";
+                    workerIconBg.className = "bg-green-100 p-3 rounded-xl text-green-600 transition-colors";
+                    workerIcon.classList.add('animate-spin-slow');
                 } else {
-                    workerStatus.innerText = "Idle / Stopped";
+                    workerStatus.innerText = "Idle";
                     workerStatus.className = "text-sm font-bold mt-1 text-gray-400";
                     workerBtn.innerText = "Start Worker";
                     workerBtn.className = "px-4 py-1.5 rounded-full text-xs font-bold bg-blue-600 text-white border-blue-600 hover:bg-blue-700 transition-all border shadow-sm";
-                    workerIcon.className = "bg-gray-100 p-3 rounded-xl text-gray-600 transition-colors";
+                    workerIconBg.className = "bg-gray-100 p-3 rounded-xl text-gray-600 transition-colors";
+                    workerIcon.classList.remove('animate-spin-slow');
                 }
 
                 const activityList = document.getElementById('recent-activity-list');
-                const recentJobs = appState.data.jobs.slice(0, 5);
-                
-                activityList.innerHTML = recentJobs.map(j => `
+                activityList.innerHTML = appState.data.jobs.slice(0, 5).map(j => `
                     <div class="p-4 flex items-center gap-4 hover:bg-gray-50 transition-all">
-                        <div class="p-2 rounded-lg ${j.status === 'COMPLETED' ? 'bg-green-100 text-green-600' : 'bg-blue-100 text-blue-600'}">
-                            <i data-lucide="${j.status === 'COMPLETED' ? 'check-circle' : 'refresh-cw'}" class="w-4 h-4 ${j.status === 'PROCESSING' ? 'animate-spin' : ''}"></i>
+                        <div class="p-2 rounded-lg ${j.status === 'COMPLETED' ? 'bg-green-100 text-green-600' : (j.status === 'FAILED' ? 'bg-red-100 text-red-600' : 'bg-blue-100 text-blue-600')}">
+                            <i data-lucide="${j.status === 'COMPLETED' ? 'check-circle' : (j.status === 'FAILED' ? 'alert-circle' : 'refresh-cw')}" class="w-4 h-4 ${j.status === 'PROCESSING' ? 'animate-spin' : ''}"></i>
                         </div>
                         <div class="flex-1">
                             <p class="text-sm font-medium">Job #${j.id}: ${j.status}</p>
-                            <p class="text-xs text-gray-400">${j.job_type} target file processed</p>
+                            <p class="text-xs text-gray-400">${j.job_type} task</p>
                         </div>
                     </div>
-                `).join('') || '<div class="p-8 text-center text-gray-400 text-sm">No recent activity detected.</div>';
+                `).join('') || '<div class="p-8 text-center text-gray-400 text-sm">No recent activity.</div>';
 
             } else if (tabId === 'files') {
-                const search = document.getElementById('file-search').value.toLowerCase();
-                const repoFilter = document.getElementById('repo-filter').value;
-                
-                const repos = [...new Set(appState.data.files.map(f => f.repo))];
-                const filterSelect = document.getElementById('repo-filter');
-                const currentVal = filterSelect.value;
-                filterSelect.innerHTML = '<option value="all">All Repositories</option>' + 
-                    repos.map(r => `<option value="${r}" ${currentVal === r ? 'selected' : ''}>${r}</option>`).join('');
-
-                const filtered = appState.data.files.filter(f => {
-                    const matchesSearch = f.name.toLowerCase().includes(search) || (f.tags && f.tags.some(t => t.toLowerCase().includes(search)));
-                    const matchesRepo = repoFilter === 'all' || f.repo === repoFilter;
-                    return matchesSearch && matchesRepo;
-                });
-
                 const tbody = document.getElementById('files-table-body');
-                tbody.innerHTML = filtered.map(f => `
+                tbody.innerHTML = appState.data.files.map(f => `
                     <tr class="hover:bg-gray-50 transition-all">
-                        <td class="px-6 py-4">
-                            <div class="font-medium text-gray-900">${f.name}</div>
-                            <div class="text-xs text-gray-400 font-mono">${f.id}</div>
-                        </td>
+                        <td class="px-6 py-4"><div class="font-medium text-gray-900">${f.name}</div><div class="text-xs text-gray-400 font-mono">${f.id}</div></td>
                         <td class="px-6 py-4 text-gray-600">${f.repo}</td>
-                        <td class="px-6 py-4">
-                            <div class="flex flex-wrap gap-1">
-                                ${(f.tags || []).map(t => `<span class="bg-gray-100 px-2 py-0.5 rounded text-[10px] text-gray-600 border">${t}</span>`).join('')}
-                            </div>
-                        </td>
-                        <td class="px-6 py-4 text-right">
-                             <div class="flex gap-2">
-                                <i data-lucide="file" class="w-4 h-4 text-gray-400"></i>
-                             </div>
-                        </td>
+                        <td class="px-6 py-4"><div class="flex flex-wrap gap-1">${(f.tags || []).map(t => `<span class="bg-gray-100 px-2 py-0.5 rounded text-[10px] text-gray-600 border">${t}</span>`).join('')}</div></td>
+                        <td class="px-6 py-4 text-right"><i data-lucide="file" class="w-4 h-4 text-gray-400"></i></td>
                     </tr>
                 `).join('');
 
             } else if (tabId === 'credentials') {
                 const list = document.getElementById('credentials-list');
                 list.innerHTML = appState.data.credentials.map(c => `
-                    <div class="bg-white p-5 rounded-2xl border shadow-sm relative group hover:border-blue-200 transition-all">
-                        <div class="bg-blue-50 w-10 h-10 rounded-lg flex items-center justify-center text-blue-600 mb-4">
-                            <i data-lucide="lock" class="w-5 h-5"></i>
-                        </div>
+                    <div class="bg-white p-5 rounded-2xl border shadow-sm group hover:border-blue-200 transition-all">
+                        <div class="bg-blue-50 w-10 h-10 rounded-lg flex items-center justify-center text-blue-600 mb-4"><i data-lucide="lock" class="w-5 h-5"></i></div>
                         <h4 class="font-bold text-gray-800">${c.description}</h4>
-                        <p class="text-xs text-gray-400 mt-1">ID: ${c.id} • Added ${c.created_at}</p>
-                        <div class="mt-4 flex justify-between items-center">
-                            <span class="text-[10px] bg-gray-50 border px-2 py-0.5 rounded uppercase tracking-wider font-bold text-gray-500">Encrypted</span>
-                            <span class="text-xs font-mono text-gray-300">****</span>
-                        </div>
+                        <p class="text-xs text-gray-400 mt-1">ID: ${c.id}</p>
+                        <div class="mt-4 flex justify-between items-center"><span class="text-[10px] bg-gray-50 border px-2 py-0.5 rounded uppercase tracking-wider font-bold text-gray-500">Encrypted</span></div>
                     </div>
                 `).join('');
 
             } else if (tabId === 'jobs') {
                 const tbody = document.getElementById('jobs-table-body');
                 tbody.innerHTML = appState.data.jobs.map(j => `
-                    <tr>
+                    <tr class="hover:bg-gray-50 transition-all">
                         <td class="px-6 py-4 text-gray-500 font-mono text-xs">#${j.id}</td>
                         <td class="px-6 py-4 font-medium">${j.job_type}</td>
-                        <td class="px-6 py-4">
-                            <span class="px-2 py-1 rounded-full text-xs font-bold status-pill-${j.status.toLowerCase()}">${j.status}</span>
-                        </td>
+                        <td class="px-6 py-4"><span class="px-2 py-1 rounded-full text-xs font-bold status-pill-${j.status.toLowerCase()}">${j.status}</span></td>
                         <td class="px-6 py-4 text-gray-500">${j.attempts}/5</td>
-                        <td class="px-6 py-4 text-xs text-gray-400 truncate max-w-xs">${j.last_error || 'No errors'}</td>
+                        <td class="px-6 py-4 flex items-center justify-between gap-4">
+                            <span class="text-xs text-gray-400 truncate max-w-[200px]" title="${j.last_error}">${j.last_error || 'No errors reported'}</span>
+                            ${j.status === 'FAILED' ? `
+                                <button onclick="retryJob('${j.id}')" class="flex items-center gap-1.5 px-3 py-1 bg-amber-50 text-amber-700 border border-amber-200 rounded-md hover:bg-amber-100 transition-all text-xs font-bold">
+                                    <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i> Retry
+                                </button>
+                            ` : ''}
+                        </td>
                     </tr>
                 `).join('');
             }
@@ -425,10 +382,9 @@
         }
 
         window.onload = () => {
-            lucide.createIcons();
             switchTab('dashboard');
             refreshData();
-            setInterval(refreshData, 5000); // More frequent updates for worker monitoring
+            setInterval(refreshData, 5000);
         };
     </script>
 </body>

@@ -121,6 +121,27 @@ async def get_jobs():
         """).fetchall()
         return [dict(row) for row in rows]
 
+@app.post("/api/jobs/{job_id}/retry")
+async def retry_job(job_id: int):
+    """Resets a job status to PENDING so the worker can retry it."""
+    debug_log(f"Request to retry job ID: {job_id}")
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        # Check if job exists
+        job = cursor.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        cursor.execute("""
+            UPDATE jobs 
+            SET status = 'PENDING', attempts = 0, last_error = NULL, updated_at = CURRENT_TIMESTAMP 
+            WHERE id = ?
+        """, (job_id,))
+        conn.commit()
+    
+    debug_log(f"Job {job_id} reset to PENDING.")
+    return {"status": "success", "message": f"Job {job_id} has been queued for retry."}
+
 @app.post("/api/worker/start")
 async def start_integrated_worker():
     """Starts the worker thread if it's not already running."""
