@@ -11,11 +11,11 @@ import threading
 import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Optional, Dict, Type, Tuple, List
+from typing import Optional, Dict, Type, Tuple, List, Any
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Import local modules from the core package
 from core.security import RepoSecurity
@@ -37,8 +37,8 @@ DEBUG_MODE = False
 
 def debug_log(message: str):
     """Helper to print debug info if DEBUG_MODE is enabled."""
-    if DEBUG_MODE:
-        print(f"[DEBUG] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {message}")
+    print(f"[DEBUG] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {message}")
+    sys.stdout.flush()
 
 # Check for PDF Support
 try:
@@ -46,6 +46,19 @@ try:
     HAS_PIKE = True
 except ImportError:
     HAS_PIKE = False
+
+# --- Models ---
+
+class WorkflowConfig(BaseModel):
+    rules: Dict[str, List[str]]
+
+class CredentialCreate(BaseModel):
+    # Use Field to ensure 'value' is mapped correctly even if sent as 'credential_value'
+    value: str = Field(..., alias="value")
+    description: Optional[str] = ""
+
+    class Config:
+        populate_by_name = True
 
 # --- Plugin/Dynamic Logic System ---
 
@@ -70,12 +83,12 @@ class UnzipHandler(BaseJobHandler):
             for root, _, files in os.walk(extract_to):
                 for f in files:
                     child_src = os.path.join(root, f)
-                    rel_path = os.path.relpath(child_src, extract_to)
-                    add_file(repo_name, child_src, original_path_prefix=f"EXTRACTED/{rel_path}")
+                    # Process each extracted file as a fresh addition to the repo
+                    add_file(repo_name, child_src)
                     extracted_count += 1
             
             shutil.rmtree(extract_to)
-            return True, f"Extracted {extracted_count} files."
+            return True, f"Extracted and processed {extracted_count} files."
         except Exception as e:
             if os.path.exists(extract_to):
                 shutil.rmtree(extract_to)
@@ -85,55 +98,58 @@ class PDFDecryptHandler(BaseJobHandler):
     @staticmethod
     def process(job_data: dict) -> Tuple[bool, str]:
         pdf_path = job_data['target_file']
-        file_id = job_data['file_id']
+        repo_name = job_data['repo']
         debug_log(f"Attempting PDF processing for: {pdf_path}")
         
         if not HAS_PIKE: 
             return False, "pikepdf not installed"
         
         try:
-            # Determine paths for the decrypted version
+            # Determine path for the decrypted version
             base_dir = os.path.dirname(pdf_path)
-            output_dir = os.path.join(base_dir, "DECRYPT_PDF")
+            output_dir = os.path.join(base_dir, "DECRYPT_TEMP")
             os.makedirs(output_dir, exist_ok=True)
             
-            output_path = os.path.join(output_dir, os.path.basename(pdf_path))
+            filename = os.path.basename(pdf_path)
+            # Use a prefix to distinguish from original in case of same directory
+            decrypted_filename = f"decrypted_{filename}"
+            output_path = os.path.join(output_dir, decrypted_filename)
+            
             is_encrypted = False
             decryption_successful = False
 
             # 1. Check if the PDF is actually encrypted
             try:
                 with pikepdf.open(pdf_path) as pdf:
-                    debug_log("PDF is not encrypted. Copying to DECRYPT_PDF folder.")
-                    shutil.copy2(pdf_path, output_path)
-                    decryption_successful = True
+                    debug_log("PDF is not encrypted. Skipping decryption workflow.")
+                    # No new file needed if it's already openable
+                    return True, "PDF already accessible."
             except pikepdf.PasswordError:
                 is_encrypted = True
                 debug_log("PDF is password protected. Searching credentials...")
 
-            # 2. If encrypted, try to unlock
-            if is_encrypted:
-                with db.get_connection() as conn:
-                    creds_rows = conn.execute("SELECT encrypted_blob FROM credentials").fetchall()
-                    passwords = [security.decrypt_data(r['encrypted_blob']) for r in creds_rows]
-                
-                for pwd in passwords:
-                    try:
-                        with pikepdf.open(pdf_path, password=pwd) as pdf:
-                            pdf.save(output_path)
-                            debug_log(f"Decryption successful with a stored password.")
-                            decryption_successful = True
-                            break
-                    except pikepdf.PasswordError:
-                        continue
+            # 2. Try to unlock with stored credentials
+            with db.get_connection() as conn:
+                creds_rows = conn.execute("SELECT encrypted_blob FROM credentials").fetchall()
+                passwords = [security.decrypt_data(r['encrypted_blob']) for r in creds_rows]
+            
+            for pwd in passwords:
+                try:
+                    with pikepdf.open(pdf_path, password=pwd) as pdf:
+                        pdf.save(output_path)
+                        debug_log(f"Decryption successful with a stored password.")
+                        decryption_successful = True
+                        break
+                except pikepdf.PasswordError:
+                    continue
 
-            # 3. Update file reference if we created a new accessible version
+            # 3. If successfully decrypted, add as a NEW file to the repo
             if decryption_successful:
-                with db.get_connection() as conn:
-                    rel_repo_path = os.path.relpath(output_path, REPO_ROOT)
-                    conn.execute("UPDATE files SET repo_path = ? WHERE id = ?", (rel_repo_path, file_id))
-                    conn.commit()
-                return True, f"Processed: {'Unlocked' if is_encrypted else 'Copied (No Password)'}"
+                add_file(repo_name, output_path)
+                # Cleanup temporary decrypted file after add_file has copied it to its permanent location
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+                return True, "Decrypted version added to repository."
             
             return False, "Failed to unlock PDF: No valid password found."
 
@@ -148,9 +164,6 @@ JOB_REGISTRY: Dict[str, Type[BaseJobHandler]] = {
 }
 
 # --- Workflow Orchestration Logic ---
-
-class WorkflowConfig(BaseModel):
-    rules: Dict[str, List[str]]
 
 def get_workflow_rules() -> Dict[str, List[str]]:
     with db.get_connection() as conn:
@@ -168,10 +181,6 @@ def get_workflow_rules() -> Dict[str, List[str]]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Lifespan context manager for FastAPI.
-    Handles startup and shutdown events.
-    """
     # Startup: Ensure the worker starts automatically
     await start_integrated_worker()
     yield
@@ -198,6 +207,65 @@ async def update_config(config: WorkflowConfig):
                      ("workflow_rules", json.dumps(config.rules)))
         conn.commit()
     return {"status": "success", "config": config.rules}
+
+@app.get("/api/credentials")
+async def list_credentials():
+    with db.get_connection() as conn:
+        rows = conn.execute("SELECT id, encrypted_blob, description, created_at FROM credentials").fetchall()
+        # Return decrypted values for management UI
+        return [{
+            "id": r["id"],
+            "value": security.decrypt_data(r["encrypted_blob"]),
+            "description": r["description"],
+            "created_at": r["created_at"]
+        } for r in rows]
+
+@app.post("/api/credentials")
+async def add_credential(request: Request):
+    """
+    Handles addition of credentials via JSON POST.
+    Expecting: {"value": "password", "description": "optional note"}
+    Updated to handle potential 422 errors by inspecting raw body and checking
+    for both 'value' and 'password' keys.
+    """
+    try:
+        body = await request.json()
+        print(f"\n[SERVER] Received Request Body: {body}", flush=True)
+        
+        # Check for 'value' or 'password' to accommodate different frontend versions
+        val = body.get("value") or body.get("password")
+        desc = body.get("description", "")
+        
+        if not val:
+            print("[SERVER] Error: Missing 'value' or 'password' field in request body", flush=True)
+            raise HTTPException(status_code=400, detail="Missing credential value")
+
+        print(f"[SERVER] Processing credential: {val}", flush=True)
+        sys.stdout.flush()
+        
+        encrypted = security.encrypt_data(val)
+        with db.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO credentials (encrypted_blob, description, created_at) VALUES (?, ?, ?)",
+                (encrypted, desc, datetime.now().isoformat())
+            )
+            conn.commit()
+        return {"status": "success"}
+    except HTTPException:
+        raise
+    except json.JSONDecodeError:
+        print("[SERVER] Error: Invalid JSON in request body", flush=True)
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    except Exception as e:
+        debug_log(f"Error adding credential: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/credentials/{cred_id}")
+async def delete_credential(cred_id: int):
+    with db.get_connection() as conn:
+        conn.execute("DELETE FROM credentials WHERE id = ?", (cred_id,))
+        conn.commit()
+    return {"status": "success"}
 
 @app.get("/api/stats")
 async def get_stats():
@@ -276,9 +344,7 @@ def run_worker():
     while worker_active:
         try:
             with db.get_connection() as conn:
-                # Optimized query to get one pending job
                 cursor = conn.cursor()
-                # Fixed: Changed j.created_at to j.id (or updated_at) because created_at doesn't exist in schema
                 job = cursor.execute("""
                     SELECT j.*, f.repo 
                     FROM jobs j
@@ -288,14 +354,13 @@ def run_worker():
                 """).fetchone()
                 
                 if not job:
-                    time.sleep(2)  # Faster polling when idle
+                    time.sleep(2)
                     continue
                 
                 job_id = job['id']
                 job_type = job['job_type']
                 debug_log(f"Worker picked up job {job_id} ({job_type})")
                 
-                # Mark as processing immediately
                 cursor.execute("UPDATE jobs SET status = 'PROCESSING', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
                 conn.commit()
 
@@ -308,7 +373,6 @@ def run_worker():
                 else:
                     success, msg = False, f"No handler registered for type: {job_type}"
                 
-                # Update job result
                 new_status = 'COMPLETED' if success else ('FAILED' if job['attempts'] >= 5 else 'PENDING')
                 cursor.execute("""
                     UPDATE jobs 
@@ -324,7 +388,11 @@ def run_worker():
 
 # --- CLI & Logic Orchestration ---
 
-def add_file(repo: str, path: str, original_path_prefix: Optional[str] = None):
+def add_file(repo: str, path: str):
+    """
+    Core logic to add a file to the repository.
+    Calculates unique ID, moves to storage, and triggers workflow jobs.
+    """
     debug_log(f"Processing: {path}")
     if not os.path.exists(path): return
 
@@ -336,6 +404,7 @@ def add_file(repo: str, path: str, original_path_prefix: Optional[str] = None):
     os.makedirs(target_dir, exist_ok=True)
     target_path = os.path.join(target_dir, filename)
     
+    # Only copy if it's not already in its target storage location
     if os.path.abspath(path) != os.path.abspath(target_path):
         shutil.copy2(path, target_path)
     
@@ -369,11 +438,17 @@ def main():
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("server")
     sub.add_parser("worker")
+    
     add_p = sub.add_parser("add")
     add_p.add_argument("repo")
     add_p.add_argument("path")
+    
     init_p = sub.add_parser("init")
     init_p.add_argument("name")
+
+    cred_p = sub.add_parser("add-cred")
+    cred_p.add_argument("value", help="The credential/password to store")
+    cred_p.add_argument("--desc", help="Optional description for the credential")
 
     args = parser.parse_args()
     if not args.cmd: return
@@ -392,6 +467,15 @@ def main():
         add_file(args.repo, args.path)
     elif args.cmd == "init":
         os.makedirs(os.path.join(REPO_ROOT, args.name), exist_ok=True)
+    elif args.cmd == "add-cred":
+        encrypted = security.encrypt_data(args.value)
+        with db.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO credentials (encrypted_blob, description, created_at) VALUES (?, ?, ?)",
+                (encrypted, args.desc, datetime.now().isoformat())
+            )
+            conn.commit()
+        print("Credential added and encrypted.", flush=True)
 
 if __name__ == "__main__":
     main()
