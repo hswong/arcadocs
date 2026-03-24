@@ -387,7 +387,13 @@ def run_worker():
             time.sleep(5)
 
 # --- CLI & Logic Orchestration ---
-
+### 3. Summary of Status Meanings
+""" * **READY**: The file is usable. (e.g., The PDF is openable or the ZIP is extracted).
+* **PENDING**: Waiting in the queue.
+* **PROCESSING**: A worker is currently reading/writing this file.
+* **LOCKED**: Processing stopped because a password is required. The user needs to add a credential and hit "Retry".
+* **FAILED**: A technical error occurred (e.g., Disk full, Corrupt file).
+ """
 def add_file(repo: str, path: str):
     """
     Core logic to add a file to the repository.
@@ -409,27 +415,37 @@ def add_file(repo: str, path: str):
         shutil.copy2(path, target_path)
     
     workflow_rules = get_workflow_rules()
+    jobs_to_trigger = workflow_rules.get(ftype, [])
+    # Set initial status
+    initial_status = 'PENDING' if jobs_to_trigger else 'READY'      
     
     with db.get_connection() as conn:
         conn.execute("""
-            INSERT OR REPLACE INTO files (id, name, repo, repo_path, tags) 
-            VALUES (?, ?, ?, ?, ?)
-        """, (fid, filename, repo, target_path, "[]"))
+            INSERT OR REPLACE INTO files (id, name, repo, repo_path, tags, processing_status, file_type) 
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (fid, filename, repo, target_path, "[]", initial_status, ftype))
         
-        jobs_to_trigger = workflow_rules.get(ftype, [])
+
         for job_type in jobs_to_trigger:
             conn.execute("INSERT INTO jobs (job_type, target_file, file_id) VALUES (?, ?, ?)",
                          (job_type, target_path, fid))
         conn.commit()
 
 def run_security_prompt():
+    """Initializes or unlocks the encryption layer via CLI."""
     if not security.is_initialized():
+        debug_log("Security config (.repo_config) not found. Prompting for initialization.")
+        print("--- Security Initialization ---")
         p = getpass.getpass("Create Master Password: ")
         security.initialize(p)
+        print("Repo key generated and locked in .repo_config.")
     else:
+        debug_log("Security config (.repo_config) found. Prompting for unlock.")
         p = getpass.getpass("Unlock Repo Master Password: ")
         if not security.unlock(p):
+            print("Authentication failed.")
             sys.exit(1)
+        debug_log("Security layer unlocked successfully.")
 
 def main():
     global DEBUG_MODE
@@ -451,7 +467,10 @@ def main():
     cred_p.add_argument("--desc", help="Optional description for the credential")
 
     args = parser.parse_args()
-    if not args.cmd: return
+    if not args.cmd:
+        parser.print_help()
+        return
+    
     if args.debug: DEBUG_MODE = True
     db.init_db()
     run_security_prompt()
