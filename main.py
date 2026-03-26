@@ -36,9 +36,10 @@ worker_active = False
 DEBUG_MODE = False
 
 def debug_log(message: str):
-    """Helper to print debug info if DEBUG_MODE is enabled."""
-    print(f"[DEBUG] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {message}")
-    sys.stdout.flush()
+    """Helper to print debug info ONLY if DEBUG_MODE is enabled."""
+    if DEBUG_MODE:
+        print(f"[DEBUG] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {message}")
+        sys.stdout.flush()
 
 # Check for PDF Support
 try:

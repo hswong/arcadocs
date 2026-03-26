@@ -1,7 +1,7 @@
 import os
 import base64
 from typing import Optional
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
@@ -53,7 +53,15 @@ class RepoSecurity:
             decrypted_repo_key = master_fernet.decrypt(encrypted_repo_key)
             self._cipher_suite = Fernet(decrypted_repo_key)
             return True
-        except Exception:
+        except InvalidToken:
+            print("Error: Invalid password or corrupted data.")
+            return False
+        except FileNotFoundError:
+            print(f"Error: Configuration file not found at {self.config_path}")
+            return False
+        except Exception as e:
+            # Fallback for unexpected errors
+            print(f"An unexpected error occurred: {type(e).__name__} - {e}")
             return False
 
     def encrypt_data(self, plain_text: str) -> str:
