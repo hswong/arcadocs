@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Family Stash Organizer</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <style>
+        :root {
+            --sidebar-width: 280px;
+        }
+
+        body {
+            background-color: #f8f9fa;
+        }
+
+        .sidebar {
+            width: var(--sidebar-width);
+            height: 100vh;
+            position: fixed;
+            background: #212529;
+            color: white;
+            padding-top: 20px;
+        }
+
+        .main-content {
+            margin-left: var(--sidebar-width);
+            padding: 30px;
+        }
+
+        .stash-card {
+            transition: transform 0.2s;
+            cursor: pointer;
+            border-left: 5px solid #0d6efd;
+        }
+
+        .stash-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .heartbeat-badge {
+            background-color: #dc3545;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+
+            100% {
+                opacity: 1;
+            }
+        }
+
+        .doc-item {
+            display: flex;
+            align-items: center;
+            padding: 8px;
+            border-bottom: 1px solid #eee;
+            text-decoration: none;
+            color: #333;
+        }
+
+        .doc-item:hover {
+            background-color: #f0f7ff;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="sidebar">
+        <div class="px-3 mb-4">
+            <h4>FamilyVault</h4>
+            <small class="text-muted" id="currentUserDisplay">Logged in as: @Husband</small>
+        </div>
+        <div class="list-group list-group-flush">
+            <button class="list-group-item list-group-item-action bg-dark text-white border-0"
+                onclick="loadStashes('all')">📂 All</button>
+            <button class="list-group-item list-group-item-action bg-dark text-white border-0"
+                onclick="loadStashes('self')">👤 Self</button>
+            <button class="list-group-item list-group-item-action bg-dark text-white border-0"
+                onclick="loadStashes('wife')">👤 Wife</button>
+            <button class="list-group-item list-group-item-action bg-dark text-white border-0"
+                onclick="loadStashes('family')">👨‍👨‍👦‍👦 Family</button>
+            <button class="list-group-item list-group-item-action bg-dark text-white border-0"
+                onclick="loadStashes('self+wife')">👤 Self+Wife</button>
+            <button class="list-group-item list-group-item-action bg-dark text-white border-0"
+                onclick="loadStashes('shared')">💓 SHARED</button>
+        </div>
+    </div>
+
+    <div class="main-content">
+        <div id="dashboardView">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h2 id="viewTitle">Dashboard Overview</h2>
+                <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addStashModal">+ New Info
+                    Entry</button>
+            </div>
+
+            <div class="row mb-4">
+                <div class="col-md-4">
+                    <div class="card p-3 shadow-sm">
+                        <h6 class="text-muted">Bank Accounts</h6>
+                        <h3 id="bankCount">0</h3>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card p-3 shadow-sm">
+                        <h6 class="text-muted">Brokerage</h6>
+                        <h3 id="brokerageCount">0</h3>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card p-3 shadow-sm">
+                        <h6 class="text-muted">Insurance</h6>
+                        <h3 id="insuranceCount">0</h3>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row" id="stashContainer">
+            </div>
+        </div>
+
+        <div id="detailView" style="display: none;">
+            <button class="btn btn-outline-secondary mb-4" onclick="showDashboard()">← Back to Dashboard</button>
+
+            <div class="card shadow-sm">
+                <div class="card-header bg-white py-3">
+                    <h3 id="detailsTitle" class="mb-0">Account Details</h3>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-7 border-end">
+                            <h5 class="text-primary">Overview</h5>
+                            <p id="detailsContent" class="lead text-muted"></p>
+
+                            <table class="table table-sm mt-4">
+                                <tr>
+                                    <th width="30%">Path:</th>
+                                    <td id="detailsPath"></td>
+                                </tr>
+                                <tr>
+                                    <th>Owner:</th>
+                                    <td id="detailsOwner"></td>
+                                </tr>
+                                <tr>
+                                    <th>Status:</th>
+                                    <td id="detailsStatus"></td>
+                                </tr>
+                            </table>
+                        </div>
+                        <div class="col-md-5">
+                            <h5 class="text-primary mb-3">Documents</h5>
+                            <div id="documentList">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="addStashModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Add Information to Stash</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="stashForm">
+                        <div class="mb-3">
+                            <label class="form-label">Stash Path</label>
+                            <select class="form-select" id="stashPath">
+                                <option value="@Husband/Wife">@Husband/Wife</option>
+                                <option value="@Husband/Family">@Husband/Family</option>
+                            </select>
+                        </div>
+                        <div class="mb-3"><label class="form-label">Category</label>
+                            <select class="form-select" id="infoType">
+                                <option value="Bank">Bank Account</option>
+                                <option value="Brokerage">Brokerage</option>
+                                <option value="Insurance">Insurance Policy</option>
+                            </select>
+                        </div>
+                        <div class="mb-3"><label class="form-label">Details</label>
+                            <textarea class="form-control" id="infoDetails" rows="3"></textarea>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary" onclick="saveData()">Save Entry</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="detailsModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-light">
+                    <h5 class="modal-title" id="detailsTitle">Account Overview</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row">
+                        <div class="col-md-6 border-end">
+                            <h6>Information Overview</h6>
+                            <p id="detailsContent" class="text-muted"></p>
+                            <hr>
+                            <small class="text-muted">Ownership: <span id="detailsOwner"></span></small><br>
+                            <small class="text-muted">Path: <span id="detailsPath"></span></small>
+                        </div>
+                        <div class="col-md-6">
+                            <h6>Associated Documents</h6>
+                            <div id="documentList" class="mt-3">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentStashItems = [];
+
+        function loadStashes(filterType) {
+            showDashboard(); // Ensure we are on the grid view when switching filters
+            $('#viewTitle').text(filterType.toUpperCase() + " View");
+
+            // Mocking the Ajax call as per previous examples
+            let mockData = [
+                { id: 101, path: "/Self", type: "Insurance", detail: "AIA #H220008808", hb: true, owner: "Husband" },
+                { id: 102, path: "/Wife", type: "Insurance", detail: "MetLife Policy #12345", hb: true, owner: "Husband" },
+                { id: 103, path: "/Family", type: "Bank", detail: "DBS Savings *9982", hb: false, owner: "Family" }
+            ];
+            renderStashes(mockData);
+        }
+
+        function renderStashes(items) {
+            currentStashItems = items;
+            let html = '';
+            let counts = { Bank: 0, Brokerage: 0, Insurance: 0 };
+
+            items.forEach((item) => {
+                if (counts[item.type] !== undefined) counts[item.type]++;
+                const hbLabel = item.hb ? '<span class="badge heartbeat-badge ms-2">💓 HB-Active</span>' : '';
+
+                html += `
+                <div class="col-md-6 mb-3">
+                    <div class="card stash-card h-100 p-3" onclick="navigateToDetails(${item.id})">
+                        <div class="d-flex justify-content-between">
+                            <small class="text-primary fw-bold">${item.path}</small>
+                            ${hbLabel}
+                        </div>
+                        <h5 class="mt-2">${item.type} Account</h5>
+                        <p class="text-muted mb-1">${item.detail}</p>
+                        <div class="mt-auto">
+                            <small class="text-muted">Managed by: ${item.owner}</small>
+                        </div>
+                    </div>
+                </div>`;
+            });
+
+            $('#stashContainer').html(html);
+            $('#bankCount').text(counts.Bank);
+            $('#brokerageCount').text(counts.Brokerage);
+            $('#insuranceCount').text(counts.Insurance);
+        }
+
+        // VIEW SWAPPING LOGIC
+        function navigateToDetails(id) {
+            const item = currentStashItems.find(i => i.id === id);
+            if (!item) return;
+
+            // Fill Data
+            $('#detailsTitle').text(item.detail);
+            $('#detailsContent').text(`This is the secure information record for your ${item.type} account.`);
+            $('#detailsOwner').text(item.owner);
+            $('#detailsPath').text(item.path);
+            $('#detailsStatus').html(item.hb ? '<span class="text-danger">Heart-Beat Enabled</span>' : 'Standard Share');
+
+            // Mock Documents
+            let docs = [
+                { name: "Statement_March_2026.pdf", size: "1.2MB" },
+                { name: "Contract_Terms.pdf", size: "450KB" }
+            ];
+            let docHtml = '';
+            docs.forEach(doc => {
+                docHtml += `
+                    <div class="doc-item border rounded mb-2 p-2">
+                        <span class="me-2">📂</span>
+                        <div class="flex-grow-1">
+                            <div class="fw-bold small">${doc.name}</div>
+                            <small class="text-muted">${doc.size}</small>
+                        </div>
+                        <button class="btn btn-sm btn-link">Download</button>
+                    </div>`;
+            });
+            $('#documentList').html(docHtml);
+
+            // Swap Views
+            $('#dashboardView').hide();
+            $('#detailView').fadeIn(200);
+        }
+
+        function showDashboard() {
+            $('#detailView').hide();
+            $('#dashboardView').fadeIn(200);
+        }
+
+        $(document).ready(function () { loadStashes('all'); });
+    </script>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+
+</html>
