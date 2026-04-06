@@ -91,4 +91,18 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE files ADD COLUMN file_type TEXT")
             cursor.execute("INSERT INTO schema_version (version) VALUES (3)")
 
+        # Migration 4: Ensure job_type and file_id are unique
+        if current_version < 4:
+            print("[DB] Applying migration v4: Unique index on job_type and file_id")
+            cursor.execute('''
+                DELETE FROM jobs
+                WHERE id NOT IN (
+                    SELECT MIN(id)
+                    FROM jobs
+                    GROUP BY job_type, file_id
+                ) AND file_id IS NOT NULL
+            ''')
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_jobtype_fileid ON jobs(job_type, file_id)")
+            cursor.execute("INSERT INTO schema_version (version) VALUES (4)")
+
         conn.commit()
