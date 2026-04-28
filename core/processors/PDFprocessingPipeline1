@@ -1,0 +1,126 @@
+import sqlite3
+import json
+import uuid
+import datetime
+import hashlib
+import os
+import subprocess
+
+APP_VERSION = "2.2.0"
+
+class PDFProcessingPipeline:
+    def __init__(self, redactor_engine, verifier_engine, db_path="redaction_audit.db"):
+        self.redactor = redactor_engine
+        self.verifier = verifier_engine
+        self.db_path = db_path
+        # Capture the Git Commit Hash instead of a file hash
+        self.git_hash = self._get_git_revision_hash()
+        self.git_branch = self._get_git_branch()
+        self._init_db()
+
+    def _get_git_revision_hash(self):
+        try:
+            # Returns the short version of the latest commit hash (e.g., 'a1b2c3d')
+            return subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
+        except Exception:
+            return "not-a-git-repo"
+
+    def _get_git_branch(self):
+        try:
+            return subprocess.check_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD']).decode('ascii').strip()
+        except Exception:
+            return "unknown"
+
+    # ... (Update your _save_state to include these in the code_fingerprint column)
+    def _generate_code_fingerprint(self):
+        try:
+            with open(__file__, "rb") as f:
+                return hashlib.md5(f.read()).hexdigest()[:8]
+        except:
+            return "unknown"
+
+    def _init_db(self):
+        """Initializes the SQLite database and table."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pdf_audit_logs (
+                    execution_id TEXT PRIMARY KEY,
+                    filename TEXT,
+                    app_version TEXT,
+                    code_fingerprint TEXT,
+                    status TEXT,
+                    traceback_map TEXT,  -- Stored as a JSON string
+                    started_at TEXT,
+                    last_updated TEXT
+                )
+            """)
+            conn.commit()
+
+    def _get_existing_state(self, filename):
+        """Checks if this file has a record in the database."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT * FROM pdf_audit_logs WHERE filename = ? ORDER BY last_updated DESC LIMIT 1", 
+                (filename,)
+            )
+            row = cursor.fetchone()
+            if row:
+                state = dict(row)
+                # Convert the JSON string back to a dictionary
+                state["traceback_key"] = json.loads(state["traceback_map"]) if state["traceback_map"] else {}
+                return state
+        return None
+
+    def _save_state(self, execution_id, filename, status, traceback_key, started_at):
+        """Upserts the current state into the database."""
+        now = datetime.datetime.now().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT INTO pdf_audit_logs 
+                (execution_id, filename, app_version, code_fingerprint, status, traceback_map, started_at, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(execution_id) DO UPDATE SET
+                    status = excluded.status,
+                    traceback_map = excluded.traceback_map,
+                    last_updated = excluded.last_updated
+            """, (
+                execution_id, filename, APP_VERSION, self.code_fingerprint, 
+                status, json.dumps(traceback_key), started_at, now
+            ))
+            conn.commit()
+
+    def run(self, input_pdf):
+        # 1. Load or Initialize State
+        existing_state = self._get_existing_state(input_pdf)
+        
+        if existing_state:
+            exec_id = existing_state["execution_id"]
+            status = existing_state["status"]
+            traceback = existing_state["traceback_key"]
+            start_time = existing_state["started_at"]
+            print(f"--- Resuming Execution {exec_id} (Status: {status}) ---")
+        else:
+            exec_id = str(uuid.uuid4())
+            status = "started"
+            traceback = {}
+            start_time = datetime.datetime.now().isoformat()
+            print(f"--- Starting New Execution {exec_id} ---")
+
+        # 2. Step: Verification
+        if status in ["started", "failed"]:
+            print(f"[{APP_VERSION}] Verifying document...")
+            self.verifier.verify_document(input_pdf) # Assuming this runs check
+            status = "verified"
+            self._save_state(exec_id, input_pdf, status, traceback, start_time)
+
+        # 3. Step: Redaction/Pseudonymization
+        if status == "verified":
+            print(f"[{APP_VERSION}] Redacting and creating traceback map...")
+            output_pdf = input_pdf.replace(".pdf", "_sanitized.pdf")
+            traceback = self.redactor.process_pdf(input_pdf, output_pdf)
+            status = "completed"
+            self._save_state(exec_id, input_pdf, status, traceback, start_time)
+            print(f"✅ Process Complete. Traceback saved to DB.")
+
+        return traceback
