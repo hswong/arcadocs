@@ -87,80 +87,117 @@ class PDFRedactionSuite:
         # This final step removes the 'hidden' text layer for the redacted areas
         page.clean_contents()
 
-    def hybrid_redaction(self, page, traceback_manager):
-        # 1. Rasterize to high-res image
-        pix = page.get_pixmap(matrix=pymupdf.Matrix(300/72, 300/72))
-        img = Image.open(io.BytesIO(pix.tobytes("png")))
+    def hybrid_redaction(self, doc, page, traceback_manager):
+        pno = page.number
+        rect = page.rect
+        
+        # 1. Rasterize
+        pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2))
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         draw = ImageDraw.Draw(img)
         
-        # 2. OCR and PII Detection
-        ocr_data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
-        full_ocr_text = " ".join(ocr_data['text'])
-        results = self.analyzer.analyze(text=full_ocr_text, language='en', 
-                                        entities=["PERSON", "LOCATION", "EMAIL_ADDRESS"])
+        # 2. OCR and Detection (standard logic)
+        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+        full_text = " ".join([w for w in data['text'] if w.strip()])
+        results = self.analyzer.analyze(text=full_text, language='en', entities=["PERSON", "LOCATION"])
 
-        # 3. Paint over the pixels on the 'img' object
+        # 3. Draw Redactions
         for res in results:
-            target = full_ocr_text[res.start:res.end]
+            target = full_text[res.start:res.end]
             label = traceback_manager.get_pseudo(target, res.entity_type)
-            
-            for i, word in enumerate(ocr_data['text']):
+            for i, word in enumerate(data['text']):
                 if word and word in target:
-                    l, t, w, h = ocr_data['left'][i], ocr_data['top'][i], ocr_data['width'][i], ocr_data['height'][i]
+                    l, t, w, h = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
                     draw.rectangle([l, t, l+w, t+h], fill="white")
                     draw.text((l, t), label, fill="red")
 
-        # --- CRITICAL: THE SANITIZATION STEP ---
-        
-        # This removes all selectable text, vector graphics, and existing paths
-        page.clean_contents() 
-        
-        # This removes any existing links or annotations (like your previous attempts)
-        for annot in page.annots():
-            page.delete_annot(annot)
-
-        # ---------------------------------------
-
-        # 4. Re-insert the flattened, redacted image
+        # 4. Prepare the New Page
         img_byte_arr = io.BytesIO()
-        # Save as JPEG to keep file size low (resolves your 50MB issue)
-        img.convert("RGB").save(img_byte_arr, format='JPEG', quality=75, optimize=True)
+        img.save(img_byte_arr, format='JPEG', quality=75, optimize=True)
         
-        page.insert_image(page.rect, stream=img_byte_arr.getvalue())
+        # 5. THE SWAP
+        # Insert the new sanitized page at the same position
+        new_page = doc.new_page(pno=pno + 1, width=rect.width, height=rect.height)
+        new_page.insert_image(rect, stream=img_byte_arr.getvalue())
+        
+        # Delete the old page ONLY after the new one is safely inserted
+        doc.delete_page(pno)
+        
+        return True # Signal success
+
+    # def hybrid_redaction(self, page, traceback_manager):
+    #     # 1. Rasterize to high-res image
+    #     pix = page.get_pixmap(matrix=pymupdf.Matrix(300/72, 300/72))
+    #     img = Image.open(io.BytesIO(pix.tobytes("png")))
+    #     draw = ImageDraw.Draw(img)
+        
+    #     # 2. OCR and PII Detection
+    #     ocr_data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+    #     full_ocr_text = " ".join(ocr_data['text'])
+    #     results = self.analyzer.analyze(text=full_ocr_text, language='en', 
+    #                                     entities=["PERSON", "LOCATION", "EMAIL_ADDRESS"])
+
+    #     # 3. Paint over the pixels on the 'img' object
+    #     for res in results:
+    #         target = full_ocr_text[res.start:res.end]
+    #         label = traceback_manager.get_pseudo(target, res.entity_type)
+            
+    #         for i, word in enumerate(ocr_data['text']):
+    #             if word and word in target:
+    #                 l, t, w, h = ocr_data['left'][i], ocr_data['top'][i], ocr_data['width'][i], ocr_data['height'][i]
+    #                 draw.rectangle([l, t, l+w, t+h], fill="white")
+    #                 draw.text((l, t), label, fill="red")
+
+    #     # --- CRITICAL: THE SANITIZATION STEP ---
+        
+    #     # This removes all selectable text, vector graphics, and existing paths
+    #     page.clean_contents() 
+        
+    #     # This removes any existing links or annotations (like your previous attempts)
+    #     for annot in page.annots():
+    #         page.delete_annot(annot)
+
+    #     # ---------------------------------------
+
+    #     # 4. Re-insert the flattened, redacted image
+    #     img_byte_arr = io.BytesIO()
+    #     # Save as JPEG to keep file size low (resolves your 50MB issue)
+    #     img.convert("RGB").save(img_byte_arr, format='JPEG', quality=75, optimize=True)
+        
+    #     page.insert_image(page.rect, stream=img_byte_arr.getvalue())
 
     # --- THE PIPELINE LOGIC ---
-
     def run_pipeline(self, input_pdf):
         exec_id = str(uuid.uuid4())
         doc = pymupdf.open(input_pdf)
         tm = TracebackManager()
         validation_summary = []
 
-        print(f"🚀 Starting Pipeline [{APP_VERSION}] | Exec: {exec_id}")
-
-        for page in doc:
-            # 1. Optical Integrity Validation
-            emb_text = page.get_text("text").strip()
-            pix = page.get_pixmap(matrix=pymupdf.Matrix(200/72, 200/72))
-            ocr_text = pytesseract.image_to_string(Image.open(io.BytesIO(pix.tobytes("png")))).strip()
+        # Iterate BACKWARDS
+        for pno in reversed(range(len(doc))):
+            page = doc[pno]
             
+            # Score calculation
+            emb_text = page.get_text("text").strip()
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(1, 1))
+            ocr_text = pytesseract.image_to_string(Image.open(io.BytesIO(pix.tobytes("png")))).strip()
             score = fuzz.ratio(emb_text.lower(), ocr_text.lower())
-            validation_summary.append({"page": page.number + 1, "score": score})
 
-            # 2. Decision Logic
-            if score < 90:
-                print(f"⚠️ Page {page.number+1}: Low Match ({score}%). Using HYBRID Redaction.")
-                self.hybrid_redaction(page, tm)
+            if score < 95:
+                # After this call, 'page' is deleted from 'doc'
+                self.hybrid_redaction(doc, page, tm)
+                method = "Hybrid"
             else:
-                print(f"✅ Page {page.number+1}: High Match ({score}%). Using STANDARD Redaction.")
                 self.standard_redaction(page, tm)
+                method = "Standard"
 
-        # 3. Finalize
+            validation_summary.append({"page": pno + 1, "score": score, "method": method})
+
+        # Finalize
         output_path = input_pdf.replace(".pdf", "_sanitized.pdf")
-        doc.save(output_path, garbage=4, deflate=True, clean=True)  
+        doc.save(output_path, garbage=4, deflate=True, clean=True)
         
         self._log_to_db(exec_id, input_pdf, tm.mapping, validation_summary)
-        print(f"🏁 Finished. Audit ID: {exec_id}")
 
     def _log_to_db(self, eid, fname, mapping, valid_res):
         with sqlite3.connect(self.db_path) as conn:

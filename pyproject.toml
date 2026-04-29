@@ -10,6 +10,12 @@ dependencies = [
 "pydantic>=2.6.0",
 "cryptography>=42.0.0",
 "pikepdf>=10.0.0",
+"pytesseract",
+"PyMuPDF",
+"Pillow",
+"rapidfuzz",
+"rich>=10.14.0,<14",
+"presidio_analyzer"
 ]
 
 [project.optional-dependencies]
