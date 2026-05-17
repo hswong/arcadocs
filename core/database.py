@@ -1,6 +1,13 @@
 from cryptography.hazmat.primitives import constant_time
 import sqlite3
 import os
+from enum import Enum
+
+class LinkType(str, Enum):
+    DEPENDENCY = "DEPENDENCY"
+    PARENT_OF = "PARENT_OF"
+    DUPLICATE = "DUPLICATE"
+    DERIVED_FROM = "DERIVED_FROM"
 
 class DatabaseManager:
     def __init__(self, db_path: str):
