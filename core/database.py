@@ -1,3 +1,4 @@
+from cryptography.hazmat.primitives import constant_time
 import sqlite3
 import os
 
@@ -104,5 +105,34 @@ class DatabaseManager:
             ''')
             cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_jobtype_fileid ON jobs(job_type, file_id)")
             cursor.execute("INSERT INTO schema_version (version) VALUES (4)")
+
+        # Migration 5: Add a link table to capture links between documents
+        if current_version < 5:
+            print("[DB] Applying migration v5: Adding file_links")
+
+            # Enable foreign key support in SQLite (critical for keeping relationships clean)
+            cursor.execute('PRAGMA foreign_keys = ON;')
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS file_links (
+                    source_file_id TEXT NOT NULL,
+                    target_file_id TEXT NOT NULL,
+                    link_type TEXT DEFAULT 'DEPENDENCY', -- e.g., 'PARENT_OF', 'DUPLICATE', 'DERIVED_FROM'
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    
+                    -- Composite Primary Key prevents duplicate links between the exact same files
+                    PRIMARY KEY (source_file_id, target_file_id, link_type),
+                    
+                    -- Foreign Keys ensure you can't link to files that don't exist
+                    -- ON DELETE CASCADE automatically removes the link if a file is deleted
+                    FOREIGN KEY (source_file_id) REFERENCES files (id) ON DELETE CASCADE,
+                    FOREIGN KEY (target_file_id) REFERENCES files (id) ON DELETE CASCADE
+                )
+            ''')
+
+            # Indexes to speed up lookups from both directions
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_links_source ON file_links(source_file_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_links_target ON file_links(target_file_id)')
+            cursor.execute("INSERT INTO schema_version (version) VALUES (5)")
 
         conn.commit()
